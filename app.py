@@ -65,6 +65,10 @@ def add_destination() -> None:
 
 
 def render_master() -> None:
+    st.markdown(
+        '<div class="section-kicker">WORKLOAD ANALYSIS · STEP 01</div>',
+        unsafe_allow_html=True,
+    )
     title, action = st.columns([5, 1])
     with title:
         st.subheader("상품마스터")
@@ -136,6 +140,10 @@ def render_destination_card(destination: dict, position: int) -> None:
 
 
 def render_orders() -> None:
+    st.markdown(
+        '<div class="section-kicker">WORKLOAD ANALYSIS · STEP 02</div>',
+        unsafe_allow_html=True,
+    )
     title, action = st.columns([5, 1])
     with title:
         st.subheader("도착지별 주문자료")
@@ -159,18 +167,95 @@ initialize_state()
 st.markdown(
     """
     <style>
-    .block-container {max-width: 1800px; padding-top: 1.7rem; padding-bottom: 3rem;}
-    div[data-testid="stMetric"] {background:#f6f8fb;border:1px solid #e1e7ef;padding:14px;border-radius:12px;}
-    div[data-testid="stDataEditor"] {border:1px solid #d9e0e8;border-radius:10px;overflow:hidden;}
-    @media (max-width: 760px) {.block-container {padding-left:.7rem;padding-right:.7rem;}}
+    :root {
+        --forest: #0b5d3b;
+        --forest-dark: #073f2a;
+        --leaf: #168a58;
+        --mint: #eaf6f0;
+        --canvas: #f4f7f5;
+        --line: #d8e5de;
+        --ink: #17211c;
+        --muted: #66736c;
+    }
+    html, body, [class*="css"] {font-family: "Pretendard", "Noto Sans KR", sans-serif;}
+    .stApp {background: var(--canvas); color: var(--ink);}
+    .block-container {max-width: 1800px; padding-top: 1.35rem; padding-bottom: 3rem;}
+    header[data-testid="stHeader"] {background: transparent;}
+    #MainMenu, footer {visibility: hidden;}
+
+    section[data-testid="stSidebar"] {
+        background: linear-gradient(180deg, var(--forest-dark) 0%, var(--forest) 100%);
+        border-right: 0;
+    }
+    section[data-testid="stSidebar"] * {color: #fff;}
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {color: #c9e2d6;}
+    section[data-testid="stSidebar"] hr {border-color: rgba(255,255,255,.15);}
+    section[data-testid="stSidebar"] div[role="radiogroup"] {gap: .35rem;}
+    section[data-testid="stSidebar"] label[data-baseweb="radio"] {
+        padding: .72rem .8rem; border-radius: .65rem; transition: .15s ease;
+    }
+    section[data-testid="stSidebar"] label[data-baseweb="radio"]:hover {
+        background: rgba(255,255,255,.10);
+    }
+    section[data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) {
+        background: #fff; box-shadow: 0 8px 20px rgba(0,0,0,.13);
+    }
+    section[data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) * {
+        color: var(--forest-dark) !important; font-weight: 750;
+    }
+
+    h1 {font-size: 2rem !important; letter-spacing: -.04em; color: var(--ink);}
+    h2, h3 {letter-spacing: -.025em; color: var(--ink);}
+    .section-kicker {font-size:.72rem;font-weight:800;letter-spacing:.13em;color:var(--leaf);margin-bottom:.25rem;}
+    .hero-panel {
+        background: linear-gradient(120deg, #0b5d3b 0%, #168a58 72%, #36a875 100%);
+        color:#fff; border-radius: 1.15rem; padding: 1.35rem 1.55rem; margin: .2rem 0 1.25rem;
+        box-shadow: 0 12px 30px rgba(11,93,59,.18); position:relative; overflow:hidden;
+    }
+    .hero-panel:after {content:"";position:absolute;width:210px;height:210px;border:42px solid rgba(255,255,255,.08);border-radius:50%;right:-70px;top:-95px;}
+    .hero-eyebrow {font-size:.72rem;font-weight:800;letter-spacing:.16em;opacity:.8;}
+    .hero-title {font-size:1.65rem;font-weight:850;margin:.25rem 0 .25rem;letter-spacing:-.035em;}
+    .hero-copy {font-size:.88rem;color:#d9efe5;}
+
+    div[data-testid="stMetric"] {
+        background:#fff;border:1px solid var(--line);padding:15px 17px;border-radius:14px;
+        box-shadow:0 4px 14px rgba(24,64,45,.045);
+    }
+    div[data-testid="stMetric"] label {color:var(--muted);}
+    div[data-testid="stMetricValue"] {color:var(--forest-dark);font-weight:800;}
+    div[data-testid="stDataEditor"] {
+        border:1px solid #cddfd5;border-radius:12px;overflow:hidden;background:#fff;
+        box-shadow:0 8px 24px rgba(24,64,45,.06);
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background:#fff;border-color:var(--line) !important;border-radius:16px !important;
+        box-shadow:0 6px 20px rgba(24,64,45,.05);
+    }
+    div[data-testid="stAlert"] {border-radius:12px;border-color:#b9dfcb;background:var(--mint);color:var(--forest-dark);}
+
+    .stButton > button {border-radius:9px;border-color:#b8cec2;font-weight:700;min-height:2.55rem;}
+    .stButton > button:hover {border-color:var(--leaf);color:var(--forest);background:#f1faf5;}
+    .stButton > button[kind="primary"] {background:var(--forest);border-color:var(--forest);color:#fff;}
+    .stButton > button[kind="primary"]:hover {background:var(--forest-dark);border-color:var(--forest-dark);color:#fff;}
+    div[data-testid="stSegmentedControl"] {background:#e7eee9;padding:.35rem;border-radius:12px;width:fit-content;}
+    div[data-testid="stSegmentedControl"] button {border:0;border-radius:8px;color:#526158;font-weight:700;}
+    div[data-testid="stSegmentedControl"] button[aria-pressed="true"] {background:#fff;color:var(--forest);box-shadow:0 3px 9px rgba(30,70,48,.12);}
+    .stTextInput input {border-color:#cddfd5;border-radius:9px;background:#fbfdfc;}
+    .stTextInput input:focus {border-color:var(--leaf);box-shadow:0 0 0 1px var(--leaf);}
+
+    @media (max-width: 760px) {
+        .block-container {padding-left:.7rem;padding-right:.7rem;padding-top:.7rem;}
+        .hero-panel {padding:1.1rem;border-radius:.9rem}.hero-title{font-size:1.35rem;}
+        div[data-testid="stSegmentedControl"] {width:100%;overflow-x:auto;}
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 with st.sidebar:
-    st.title("ZENIEL OPS")
-    st.caption("물류 운영 통합 시스템")
+    st.markdown("## ZENIEL OPS")
+    st.caption("LOGISTICS OPERATION SYSTEM")
     main_menu = st.radio(
         "전체 메뉴",
         ["종합 업무상황판", "작업량 분석", "로스 분석", "재고 관리", "인원·근무 관리", "기준정보·설정"],
@@ -183,8 +268,16 @@ if main_menu != "작업량 분석":
     st.title(main_menu)
     st.info("준비 중인 메뉴입니다. 현재는 작업량 분석의 입력 구조를 먼저 만들고 있습니다.")
 else:
-    st.title("작업량 분석")
-    st.caption("상품마스터와 도착지별 주문자료를 준비한 뒤 검증과 분석으로 진행합니다.")
+    st.markdown(
+        """
+        <div class="hero-panel">
+            <div class="hero-eyebrow">ZENIEL LOGISTICS</div>
+            <div class="hero-title">작업량 분석</div>
+            <div class="hero-copy">상품마스터와 도착지별 주문자료를 준비하고, 검증을 거쳐 작업 부하를 분석합니다.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     pages = ["상품마스터", "도착지별 주문자료", "데이터 검증", "분석 결과"]
     selected = st.segmented_control(
