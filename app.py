@@ -1,5 +1,6 @@
 import pandas as pd
 import streamlit as st
+from datetime import date
 
 
 st.set_page_config(
@@ -41,7 +42,6 @@ def filled_rows(frame: pd.DataFrame) -> int:
 
 def initialize_state() -> None:
     defaults = {
-        "workload_page": "상품마스터",
         "master_data": empty_frame(MASTER_COLUMNS),
         "destinations": [{"id": 1, "name": "도착지 1", "data": empty_frame(ORDER_COLUMNS)}],
         "destination_seq": 1,
@@ -284,8 +284,8 @@ def render_validation() -> None:
 
 
 def render_analysis() -> None:
-    st.markdown('<div class="section-kicker">WORKLOAD ANALYSIS · STEP 04</div>', unsafe_allow_html=True)
-    st.subheader("분석 결과")
+    st.markdown('<div class="section-kicker">WORKLOAD ANALYSIS · DASHBOARD</div>', unsafe_allow_html=True)
+    st.subheader("피킹존 작업부하 분석 대시보드")
     detail = st.session_state.analysis_detail
     if detail is None:
         st.info("먼저 ‘데이터 검증’에서 검증 실행을 눌러주세요.")
@@ -293,16 +293,6 @@ def render_analysis() -> None:
     if detail.empty:
         st.warning("분석 가능한 주문자료가 없습니다. 검증 결과를 확인해주세요.")
         return
-
-    total_qty = detail["확정수량_숫자"].sum()
-    total_boxes = detail["박스수"].sum()
-    total_each = detail["낱개수"].sum()
-    total_touches = detail["접촉횟수"].sum()
-    a, b, c, d = st.columns(4)
-    a.metric("총 확정수량", f"{total_qty:,.0f}")
-    b.metric("총 박스수", f"{total_boxes:,.0f}")
-    c.metric("총 낱개수", f"{total_each:,.0f}")
-    d.metric("총 접촉횟수", f"{total_touches:,.0f}")
 
     by_zone = detail.groupby("묶음존", as_index=False).agg(
         SKU수=("상품코드_키", "nunique"),
@@ -313,6 +303,17 @@ def render_analysis() -> None:
         접촉횟수=("접촉횟수", "sum"),
         처리물량KG=("처리물량KG_숫자", "sum"),
     ).sort_values("접촉횟수", ascending=False)
+    by_zone["기준작업량"] = by_zone["접촉횟수"].astype(float)
+    total_workload = by_zone["기준작업량"].sum()
+    average_workload = by_zone["기준작업량"].mean()
+    by_zone["비중"] = by_zone["기준작업량"].div(total_workload).fillna(0)
+    by_zone["강도지수"] = by_zone["기준작업량"].div(average_workload).fillna(0)
+    by_zone["작업강도"] = pd.cut(
+        by_zone["강도지수"],
+        bins=[-float("inf"), 0.7, 1.3, float("inf")],
+        labels=["낮음", "보통", "높음"],
+        right=False,
+    ).astype(str)
     by_destination = detail.groupby("도착지", as_index=False).agg(
         SKU수=("상품코드_키", "nunique"),
         주문행수=("상품코드_키", "size"),
@@ -323,10 +324,73 @@ def render_analysis() -> None:
         처리물량KG=("처리물량KG_숫자", "sum"),
     ).sort_values("접촉횟수", ascending=False)
 
-    tab_zone, tab_destination, tab_detail = st.tabs(["존별 분석", "도착지별 분석", "상품별 상세"])
-    with tab_zone:
-        st.bar_chart(by_zone.set_index("묶음존")["접촉횟수"], color="#168a58")
-        st.dataframe(by_zone, use_container_width=True, hide_index=True)
+    top_zone = by_zone.iloc[0]
+    overloaded = int(by_zone["강도지수"].ge(1.3).sum())
+    destinations = [d["name"] or f"도착지 {d['id']}" for d in st.session_state.destinations if filled_rows(d["data"])]
+    destination_label = ", ".join(destinations) if destinations else "입력 없음"
+
+    st.markdown(
+        f'<div class="analysis-meta"><b>분석일자</b> {date.today().isoformat()}<span></span>'
+        f'<b>주문자료</b> {destination_label}</div>',
+        unsafe_allow_html=True,
+    )
+    a, b, c, d, e = st.columns(5)
+    a.metric("분석대상 라인수", f"{len(detail):,}")
+    b.metric("총 출고수량", f"{detail['확정수량_숫자'].sum():,.0f}")
+    c.metric("총 기준작업량", f"{total_workload:,.0f}")
+    d.metric("최고 부하존", str(top_zone["묶음존"]))
+    e.metric("과부하 존수", f"{overloaded:,}")
+
+    table_view = by_zone[[
+        "묶음존", "주문행수", "확정수량", "박스수", "낱개수", "접촉횟수",
+        "처리물량KG", "기준작업량", "비중", "강도지수", "작업강도",
+    ]].copy()
+    table_view.columns = [
+        "분석피킹존", "라인수", "총출고수량", "박스수", "낱개수", "접촉횟수",
+        "총중량(kg)", "기준작업량", "비중", "강도지수", "작업강도",
+    ]
+    table_view["비중"] = table_view["비중"].map(lambda value: f"{value:.1%}")
+    for column in ["총중량(kg)", "기준작업량", "강도지수"]:
+        table_view[column] = table_view[column].map(lambda value: f"{value:,.1f}")
+
+    left, right = st.columns([1.65, 1], gap="large")
+    with left:
+        st.markdown("#### 존별 작업부하 상세")
+        styled = table_view.style.apply(
+            lambda row: [
+                "background-color:#ffe3e3;font-weight:700" if row["작업강도"] == "높음"
+                else "background-color:#fff1c9" if row["작업강도"] == "보통"
+                else "background-color:#e9f6df" for _ in row
+            ], axis=1
+        )
+        st.dataframe(styled, use_container_width=True, hide_index=True, height=480)
+    with right:
+        st.markdown("#### 존별 기준작업량")
+        st.bar_chart(by_zone.set_index("묶음존")["기준작업량"], color="#168a58", height=420)
+
+    interpretation = (
+        f"최고 부하존은 **{top_zone['묶음존']}**이며, 전체 기준작업량의 "
+        f"**{top_zone['비중']:.1%}**를 차지합니다. 평균 대비 강도지수는 "
+        f"**{top_zone['강도지수']:.2f}**입니다."
+    )
+    guide, comment = st.columns([1, 1.55], gap="large")
+    with guide:
+        st.markdown("#### 작업강도 읽는 법")
+        st.markdown(
+            """
+            <div class="grade-guide">
+              <div><b>낮음</b><span>평균 대비 0.70 미만</span></div>
+              <div><b>보통</b><span>평균 대비 0.70~1.30</span></div>
+              <div><b>높음</b><span>평균 대비 1.30 이상</span></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with comment:
+        st.markdown("#### 자동 분석")
+        st.info(interpretation)
+
+    tab_destination, tab_detail = st.tabs(["도착지별 분석", "상품별 상세"])
     with tab_destination:
         st.bar_chart(by_destination.set_index("도착지")["접촉횟수"], color="#0b5d3b")
         st.dataframe(by_destination, use_container_width=True, hide_index=True)
@@ -335,7 +399,39 @@ def render_analysis() -> None:
         detail_view.columns = ["도착지", "상품코드", "상품명칭", "피킹존", "묶음존", "확정수량", "박스입수", "박스수", "낱개수", "접촉횟수", "처리물량(KG)"]
         st.dataframe(detail_view, use_container_width=True, hide_index=True, height=520)
 
-    st.caption("접촉횟수 = 완박스 수 + 낱개가 있을 경우 1회로 계산했습니다. 인원·숙련도·중량 가중치는 아직 적용하지 않았습니다.")
+    st.caption("기준작업량은 현재 접촉횟수와 동일합니다. 강도지수는 각 존의 기준작업량 ÷ 존 평균입니다. 인원·숙련도·중량 가중치는 아직 적용하지 않았습니다.")
+
+
+def render_workload_page() -> None:
+    st.markdown("### 입력자료")
+    master_rows = filled_rows(st.session_state.master_data)
+    order_rows = sum(filled_rows(item["data"]) for item in st.session_state.destinations)
+    a, b, c = st.columns(3)
+    a.metric("상품마스터", f"{master_rows:,}행")
+    b.metric("등록 도착지", f"{len(st.session_state.destinations):,}개")
+    c.metric("주문자료", f"{order_rows:,}행")
+
+    with st.expander("상품마스터 관리", expanded=master_rows == 0):
+        render_master()
+    st.markdown("#### 도착지별 주문자료")
+    render_orders()
+
+    st.markdown("### 검증 및 분석")
+    button_col, note_col = st.columns([1, 4])
+    with button_col:
+        st.button("검증하고 분석하기", on_click=run_validation, type="primary", use_container_width=True)
+    with note_col:
+        st.caption("상품코드·피킹존·박스입수·확정수량을 검증한 뒤 정상 행으로 대시보드를 갱신합니다.")
+
+    result = st.session_state.validation_result
+    if result is not None:
+        if result.empty:
+            st.success("검증이 완료되었습니다. 분석 가능한 오류가 없습니다.")
+        else:
+            st.warning(f"확인할 항목이 {len(result):,}건 있습니다. 해당 행은 분석에서 제외했습니다.")
+            with st.expander("검증 오류 상세 보기"):
+                st.dataframe(result, use_container_width=True, hide_index=True, height=260)
+        render_analysis()
 
 
 def render_placeholder(title: str, message: str) -> None:
@@ -424,6 +520,14 @@ st.markdown(
     div[data-testid="stSegmentedControl"] button[aria-pressed="true"] {background:#fff;color:var(--forest);box-shadow:0 3px 9px rgba(30,70,48,.12);}
     .stTextInput input {border-color:#cddfd5;border-radius:9px;background:#fbfdfc;}
     .stTextInput input:focus {border-color:var(--leaf);box-shadow:0 0 0 1px var(--leaf);}
+    .analysis-meta {
+        display:flex;align-items:center;gap:.65rem;background:#fff;border:1px solid var(--line);
+        border-radius:10px;padding:.7rem .9rem;margin:.4rem 0 1rem;color:var(--muted);font-size:.86rem;
+    }
+    .analysis-meta b {color:var(--forest-dark);}.analysis-meta span{width:1px;height:18px;background:var(--line);}
+    .grade-guide {background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;}
+    .grade-guide div {display:flex;justify-content:space-between;padding:.7rem .9rem;border-bottom:1px solid var(--line);}
+    .grade-guide div:last-child {border-bottom:0;}.grade-guide b{color:var(--forest-dark);}.grade-guide span{color:var(--muted);}
 
     @media (max-width: 760px) {
         .block-container {padding-left:.7rem;padding-right:.7rem;padding-top:.7rem;}
@@ -461,24 +565,4 @@ else:
         unsafe_allow_html=True,
     )
 
-    pages = ["상품마스터", "도착지별 주문자료", "데이터 검증", "분석 결과"]
-    selected = st.segmented_control(
-        "작업 단계",
-        pages,
-        default=st.session_state.workload_page,
-        key="workload_navigation",
-        selection_mode="single",
-        label_visibility="collapsed",
-    )
-    if selected:
-        st.session_state.workload_page = selected
-    st.divider()
-
-    if st.session_state.workload_page == "상품마스터":
-        render_master()
-    elif st.session_state.workload_page == "도착지별 주문자료":
-        render_orders()
-    elif st.session_state.workload_page == "데이터 검증":
-        render_validation()
-    else:
-        render_analysis()
+    render_workload_page()
