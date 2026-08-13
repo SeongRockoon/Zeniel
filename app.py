@@ -45,6 +45,8 @@ def initialize_state() -> None:
         "master_data": empty_frame(MASTER_COLUMNS),
         "destinations": [{"id": 1, "name": "도착지 1", "data": empty_frame(ORDER_COLUMNS)}],
         "destination_seq": 1,
+        "validation_result": None,
+        "analysis_detail": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -84,7 +86,7 @@ def render_master() -> None:
         st.session_state.master_data,
         key="master_editor",
         num_rows="dynamic",
-        height=570,
+        height=330,
         use_container_width=True,
         hide_index=False,
         column_config={column: st.column_config.TextColumn(column, width="medium") for column in MASTER_COLUMNS},
@@ -99,7 +101,9 @@ def render_master() -> None:
 
 def render_destination_card(destination: dict, position: int) -> None:
     destination_id = destination["id"]
-    with st.container(border=True):
+    input_count = filled_rows(destination["data"])
+    label = destination["name"] or f"도착지 {destination_id}"
+    with st.expander(f"{label}  ·  입력 {input_count:,}행", expanded=False):
         name_col, clear_col, delete_col = st.columns([5, 1, 1])
         with name_col:
             destination["name"] = st.text_input(
@@ -127,7 +131,7 @@ def render_destination_card(destination: dict, position: int) -> None:
             destination["data"],
             key=f"order_editor_{destination_id}",
             num_rows="dynamic",
-            height=430,
+            height=300,
             use_container_width=True,
             hide_index=False,
             column_config={column: st.column_config.TextColumn(column, width="medium") for column in ORDER_COLUMNS},
@@ -154,6 +158,184 @@ def render_orders() -> None:
     st.info("각 표의 첫 번째 셀을 선택하고 엑셀의 데이터 행을 Ctrl+V 하세요. 열 제목은 제외합니다.")
     for position, destination in enumerate(st.session_state.destinations):
         render_destination_card(destination, position)
+
+
+def normalized_text(series: pd.Series) -> pd.Series:
+    return series.fillna("").astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+
+
+def numeric_series(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(
+        series.fillna("").astype(str).str.replace(",", "", regex=False).str.strip(),
+        errors="coerce",
+    )
+
+
+def compact_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    clean = frame.fillna("").copy()
+    mask = clean.astype(str).apply(lambda col: col.str.strip()).ne("").any(axis=1)
+    return clean.loc[mask].reset_index(drop=True)
+
+
+def grouped_zone(value: object) -> str:
+    zone = str(value).strip().upper()
+    if zone in {"L01", "L02", "L03", "L04", "L05", "M01"}:
+        return "L01"
+    if zone in {"L06", "L07", "L08", "L09", "L10", "L11", "L12", "L13", "M02"}:
+        return "L06"
+    if zone in {"J", "J01", "D", "W"}:
+        return "J01"
+    if zone == "K22":
+        return "K22"
+    if zone.startswith("K") and zone[1:].isdigit() and int(zone[1:]) >= 23:
+        return "K23"
+    return zone or "미지정"
+
+
+def validate_and_analyze() -> tuple[pd.DataFrame, pd.DataFrame]:
+    issues: list[dict] = []
+    master = compact_frame(st.session_state.master_data)
+    if master.empty:
+        issues.append({"구분": "상품마스터", "위치": "전체", "오류": "상품마스터가 비어 있습니다."})
+        return pd.DataFrame(issues), pd.DataFrame()
+
+    master["상품코드_키"] = normalized_text(master["상품코드"])
+    master["박스입수_숫자"] = numeric_series(master["박스입수"])
+    for index, row in master.iterrows():
+        excel_row = index + 1
+        if not row["상품코드_키"]:
+            issues.append({"구분": "상품마스터", "위치": f"{excel_row}행", "오류": "상품코드 누락"})
+        if pd.isna(row["박스입수_숫자"]) or row["박스입수_숫자"] <= 0:
+            issues.append({"구분": "상품마스터", "위치": f"{excel_row}행", "오류": "박스입수가 숫자가 아니거나 0 이하"})
+        if not str(row["피킹존"]).strip():
+            issues.append({"구분": "상품마스터", "위치": f"{excel_row}행", "오류": "피킹존 누락"})
+
+    duplicates = master.loc[master["상품코드_키"].ne("") & master["상품코드_키"].duplicated(False), "상품코드_키"].unique()
+    for code in duplicates:
+        issues.append({"구분": "상품마스터", "위치": code, "오류": "상품코드 중복 — 마지막 행을 분석에 사용"})
+
+    master_lookup = master.drop_duplicates("상품코드_키", keep="last")
+    detail_parts = []
+    for destination in st.session_state.destinations:
+        orders = compact_frame(destination["data"])
+        if orders.empty:
+            continue
+        name = destination["name"] or f"도착지 {destination['id']}"
+        orders["상품코드_키"] = normalized_text(orders["상품정보 | 상품코드"])
+        orders["확정수량_숫자"] = numeric_series(orders["수량정보 | 확정수량"])
+        orders["처리물량KG_숫자"] = numeric_series(orders["처리물량(KG)"])
+        for index, row in orders.iterrows():
+            excel_row = index + 1
+            if not row["상품코드_키"]:
+                issues.append({"구분": name, "위치": f"{excel_row}행", "오류": "상품코드 누락"})
+            elif row["상품코드_키"] not in set(master_lookup["상품코드_키"]):
+                issues.append({"구분": name, "위치": f"{excel_row}행", "오류": f"상품마스터 미등록: {row['상품코드_키']}"})
+            if pd.isna(row["확정수량_숫자"]) or row["확정수량_숫자"] < 0:
+                issues.append({"구분": name, "위치": f"{excel_row}행", "오류": "확정수량이 숫자가 아니거나 음수"})
+
+        merged = orders.merge(
+            master_lookup[["상품코드_키", "상품명칭", "피킹존", "박스입수_숫자"]],
+            on="상품코드_키", how="left",
+        )
+        valid = merged[
+            merged["상품코드_키"].ne("")
+            & merged["박스입수_숫자"].notna()
+            & merged["박스입수_숫자"].gt(0)
+            & merged["확정수량_숫자"].notna()
+            & merged["확정수량_숫자"].ge(0)
+        ].copy()
+        if valid.empty:
+            continue
+        valid["도착지"] = name
+        valid["묶음존"] = valid["피킹존"].map(grouped_zone)
+        valid["박스수"] = (valid["확정수량_숫자"] // valid["박스입수_숫자"]).astype(int)
+        valid["낱개수"] = (valid["확정수량_숫자"] % valid["박스입수_숫자"]).astype(int)
+        valid["접촉횟수"] = valid["박스수"] + (valid["낱개수"] > 0).astype(int)
+        detail_parts.append(valid)
+
+    if not detail_parts:
+        return pd.DataFrame(issues), pd.DataFrame()
+    detail = pd.concat(detail_parts, ignore_index=True)
+    return pd.DataFrame(issues), detail
+
+
+def run_validation() -> None:
+    issues, detail = validate_and_analyze()
+    st.session_state.validation_result = issues
+    st.session_state.analysis_detail = detail
+
+
+def render_validation() -> None:
+    st.markdown('<div class="section-kicker">WORKLOAD ANALYSIS · STEP 03</div>', unsafe_allow_html=True)
+    st.subheader("데이터 검증")
+    st.caption("상품마스터와 모든 도착지 주문자료의 상품코드·박스입수·피킹존·확정수량을 확인합니다.")
+    st.button("검증 실행", on_click=run_validation, type="primary")
+    result = st.session_state.validation_result
+    if result is None:
+        st.info("검증 실행을 누르면 오류 위치와 원인을 표시합니다.")
+        return
+    if result.empty:
+        st.success("검증이 완료되었습니다. 분석 가능한 오류가 없습니다.")
+    else:
+        st.warning(f"확인할 항목이 {len(result):,}건 있습니다. 오류가 있는 행은 분석에서 제외됩니다.")
+        st.dataframe(result, use_container_width=True, hide_index=True, height=380)
+    if st.session_state.analysis_detail is not None and not st.session_state.analysis_detail.empty:
+        st.caption(f"현재 분석 가능 주문행: {len(st.session_state.analysis_detail):,}행")
+
+
+def render_analysis() -> None:
+    st.markdown('<div class="section-kicker">WORKLOAD ANALYSIS · STEP 04</div>', unsafe_allow_html=True)
+    st.subheader("분석 결과")
+    detail = st.session_state.analysis_detail
+    if detail is None:
+        st.info("먼저 ‘데이터 검증’에서 검증 실행을 눌러주세요.")
+        return
+    if detail.empty:
+        st.warning("분석 가능한 주문자료가 없습니다. 검증 결과를 확인해주세요.")
+        return
+
+    total_qty = detail["확정수량_숫자"].sum()
+    total_boxes = detail["박스수"].sum()
+    total_each = detail["낱개수"].sum()
+    total_touches = detail["접촉횟수"].sum()
+    a, b, c, d = st.columns(4)
+    a.metric("총 확정수량", f"{total_qty:,.0f}")
+    b.metric("총 박스수", f"{total_boxes:,.0f}")
+    c.metric("총 낱개수", f"{total_each:,.0f}")
+    d.metric("총 접촉횟수", f"{total_touches:,.0f}")
+
+    by_zone = detail.groupby("묶음존", as_index=False).agg(
+        SKU수=("상품코드_키", "nunique"),
+        주문행수=("상품코드_키", "size"),
+        확정수량=("확정수량_숫자", "sum"),
+        박스수=("박스수", "sum"),
+        낱개수=("낱개수", "sum"),
+        접촉횟수=("접촉횟수", "sum"),
+        처리물량KG=("처리물량KG_숫자", "sum"),
+    ).sort_values("접촉횟수", ascending=False)
+    by_destination = detail.groupby("도착지", as_index=False).agg(
+        SKU수=("상품코드_키", "nunique"),
+        주문행수=("상품코드_키", "size"),
+        확정수량=("확정수량_숫자", "sum"),
+        박스수=("박스수", "sum"),
+        낱개수=("낱개수", "sum"),
+        접촉횟수=("접촉횟수", "sum"),
+        처리물량KG=("처리물량KG_숫자", "sum"),
+    ).sort_values("접촉횟수", ascending=False)
+
+    tab_zone, tab_destination, tab_detail = st.tabs(["존별 분석", "도착지별 분석", "상품별 상세"])
+    with tab_zone:
+        st.bar_chart(by_zone.set_index("묶음존")["접촉횟수"], color="#168a58")
+        st.dataframe(by_zone, use_container_width=True, hide_index=True)
+    with tab_destination:
+        st.bar_chart(by_destination.set_index("도착지")["접촉횟수"], color="#0b5d3b")
+        st.dataframe(by_destination, use_container_width=True, hide_index=True)
+    with tab_detail:
+        detail_view = detail[["도착지", "상품코드_키", "상품명칭", "피킹존", "묶음존", "확정수량_숫자", "박스입수_숫자", "박스수", "낱개수", "접촉횟수", "처리물량KG_숫자"]].copy()
+        detail_view.columns = ["도착지", "상품코드", "상품명칭", "피킹존", "묶음존", "확정수량", "박스입수", "박스수", "낱개수", "접촉횟수", "처리물량(KG)"]
+        st.dataframe(detail_view, use_container_width=True, hide_index=True, height=520)
+
+    st.caption("접촉횟수 = 완박스 수 + 낱개가 있을 경우 1회로 계산했습니다. 인원·숙련도·중량 가중치는 아직 적용하지 않았습니다.")
 
 
 def render_placeholder(title: str, message: str) -> None:
@@ -297,6 +479,6 @@ else:
     elif st.session_state.workload_page == "도착지별 주문자료":
         render_orders()
     elif st.session_state.workload_page == "데이터 검증":
-        render_placeholder("데이터 검증", "다음 단계에서 상품코드 대조와 필수값 검증을 연결합니다.")
+        render_validation()
     else:
-        render_placeholder("분석 결과", "검증 기준과 작업량 계산식을 확정한 뒤 연결합니다.")
+        render_analysis()
