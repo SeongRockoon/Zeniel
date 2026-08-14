@@ -212,9 +212,15 @@ def validate_and_analyze() -> tuple[pd.DataFrame, pd.DataFrame]:
 
     duplicates = master.loc[master["상품코드_키"].ne("") & master["상품코드_키"].duplicated(False), "상품코드_키"].unique()
     for code in duplicates:
-        issues.append({"구분": "상품마스터", "위치": code, "오류": "상품코드 중복 — 마지막 행을 분석에 사용"})
+        candidates = master.loc[master["상품코드_키"].eq(code), ["피킹존", "박스입수_숫자"]].drop_duplicates()
+        if len(candidates) > 1:
+            issues.append({
+                "구분": "상품마스터", "위치": code,
+                "오류": "동일 상품코드에 피킹존 또는 박스입수가 여러 개입니다 — 첫 번째 행을 사용",
+            })
 
-    master_lookup = master.drop_duplicates("상품코드_키", keep="last")
+    # 엑셀의 일반적인 XLOOKUP/VLOOKUP 첫 일치 방식과 동일하게 첫 번째 상품을 사용한다.
+    master_lookup = master.drop_duplicates("상품코드_키", keep="first")
     detail_parts = []
     for destination in st.session_state.destinations:
         orders = compact_frame(destination["data"])
@@ -224,6 +230,7 @@ def validate_and_analyze() -> tuple[pd.DataFrame, pd.DataFrame]:
         orders["상품코드_키"] = normalized_text(orders["상품정보 | 상품코드"])
         orders["확정수량_숫자"] = numeric_series(orders["수량정보 | 확정수량"])
         orders["처리물량KG_숫자"] = numeric_series(orders["처리물량(KG)"])
+        orders["주문단위_키"] = normalized_text(orders["주문단위"]).str.upper()
         for index, row in orders.iterrows():
             excel_row = index + 1
             if not row["상품코드_키"]:
@@ -232,6 +239,8 @@ def validate_and_analyze() -> tuple[pd.DataFrame, pd.DataFrame]:
                 issues.append({"구분": name, "위치": f"{excel_row}행", "오류": f"상품마스터 미등록: {row['상품코드_키']}"})
             if pd.isna(row["확정수량_숫자"]) or row["확정수량_숫자"] < 0:
                 issues.append({"구분": name, "위치": f"{excel_row}행", "오류": "확정수량이 숫자가 아니거나 음수"})
+            if row["주문단위_키"] not in {"EA", "BOX", "박스", "CASE", "CS"}:
+                issues.append({"구분": name, "위치": f"{excel_row}행", "오류": f"확인되지 않은 주문단위: {row['주문단위_키'] or '공란'}"})
 
         merged = orders.merge(
             master_lookup[["상품코드_키", "상품명칭", "피킹존", "박스입수_숫자"]],
@@ -243,14 +252,25 @@ def validate_and_analyze() -> tuple[pd.DataFrame, pd.DataFrame]:
             & merged["박스입수_숫자"].gt(0)
             & merged["확정수량_숫자"].notna()
             & merged["확정수량_숫자"].ge(0)
+            & merged["주문단위_키"].isin({"EA", "BOX", "박스", "CASE", "CS"})
         ].copy()
         if valid.empty:
             continue
         valid["도착지"] = name
         valid["묶음존"] = valid["피킹존"].map(grouped_zone)
-        valid["박스수"] = (valid["확정수량_숫자"] // valid["박스입수_숫자"]).astype(int)
-        valid["낱개수"] = (valid["확정수량_숫자"] % valid["박스입수_숫자"]).astype(int)
-        valid["접촉횟수"] = valid["박스수"] + (valid["낱개수"] > 0).astype(int)
+        box_order = valid["주문단위_키"].isin({"BOX", "박스", "CASE", "CS"})
+        valid["박스수"] = 0
+        valid["낱개수"] = 0
+        valid.loc[box_order, "박스수"] = valid.loc[box_order, "확정수량_숫자"]
+        valid.loc[~box_order, "박스수"] = (
+            valid.loc[~box_order, "확정수량_숫자"] // valid.loc[~box_order, "박스입수_숫자"]
+        )
+        valid.loc[~box_order, "낱개수"] = (
+            valid.loc[~box_order, "확정수량_숫자"] % valid.loc[~box_order, "박스입수_숫자"]
+        )
+        valid[["박스수", "낱개수"]] = valid[["박스수", "낱개수"]].astype(int)
+        # 기준 엑셀과 동일: 낱개가 있는 행을 1회로 보지 않고 실제 낱개 수량을 모두 접촉으로 계산한다.
+        valid["접촉횟수"] = valid["박스수"] + valid["낱개수"]
         detail_parts.append(valid)
 
     if not detail_parts:
@@ -303,17 +323,8 @@ def render_analysis() -> None:
         접촉횟수=("접촉횟수", "sum"),
         처리물량KG=("처리물량KG_숫자", "sum"),
     ).sort_values("접촉횟수", ascending=False)
-    by_zone["기준작업량"] = by_zone["접촉횟수"].astype(float)
-    total_workload = by_zone["기준작업량"].sum()
-    average_workload = by_zone["기준작업량"].mean()
-    by_zone["비중"] = by_zone["기준작업량"].div(total_workload).fillna(0)
-    by_zone["강도지수"] = by_zone["기준작업량"].div(average_workload).fillna(0)
-    by_zone["작업강도"] = pd.cut(
-        by_zone["강도지수"],
-        bins=[-float("inf"), 0.7, 1.3, float("inf")],
-        labels=["낮음", "보통", "높음"],
-        right=False,
-    ).astype(str)
+    total_touches = by_zone["접촉횟수"].sum()
+    by_zone["접촉비중"] = by_zone["접촉횟수"].div(total_touches).fillna(0)
     by_destination = detail.groupby("도착지", as_index=False).agg(
         SKU수=("상품코드_키", "nunique"),
         주문행수=("상품코드_키", "size"),
@@ -325,7 +336,6 @@ def render_analysis() -> None:
     ).sort_values("접촉횟수", ascending=False)
 
     top_zone = by_zone.iloc[0]
-    overloaded = int(by_zone["강도지수"].ge(1.3).sum())
     destinations = [d["name"] or f"도착지 {d['id']}" for d in st.session_state.destinations if filled_rows(d["data"])]
     destination_label = ", ".join(destinations) if destinations else "입력 없음"
 
@@ -334,61 +344,46 @@ def render_analysis() -> None:
         f'<b>주문자료</b> {destination_label}</div>',
         unsafe_allow_html=True,
     )
+    source_rows = sum(filled_rows(item["data"]) for item in st.session_state.destinations)
+    excluded_rows = max(source_rows - len(detail), 0)
     a, b, c, d, e = st.columns(5)
-    a.metric("분석대상 라인수", f"{len(detail):,}")
-    b.metric("총 출고수량", f"{detail['확정수량_숫자'].sum():,.0f}")
-    c.metric("총 기준작업량", f"{total_workload:,.0f}")
-    d.metric("최고 부하존", str(top_zone["묶음존"]))
-    e.metric("과부하 존수", f"{overloaded:,}")
+    a.metric("원본 라인수", f"{source_rows:,}")
+    b.metric("분석 라인수", f"{len(detail):,}")
+    c.metric("제외 라인수", f"{excluded_rows:,}")
+    d.metric("총 출고수량", f"{detail['확정수량_숫자'].sum():,.0f}")
+    e.metric("총 접촉횟수", f"{total_touches:,.0f}")
+
+    st.warning(
+        "보정작업량 계수가 현재 앱에 확인되지 않아 보정작업량·강도지수·작업강도는 계산하지 않습니다. "
+        "확정되지 않은 임시값을 표시하지 않도록 수정했습니다."
+    )
 
     table_view = by_zone[[
         "묶음존", "주문행수", "확정수량", "박스수", "낱개수", "접촉횟수",
-        "처리물량KG", "기준작업량", "비중", "강도지수", "작업강도",
+        "처리물량KG", "접촉비중",
     ]].copy()
     table_view.columns = [
         "분석피킹존", "라인수", "총출고수량", "박스수", "낱개수", "접촉횟수",
-        "총중량(kg)", "기준작업량", "비중", "강도지수", "작업강도",
+        "총중량(kg)", "접촉비중",
     ]
-    table_view["비중"] = table_view["비중"].map(lambda value: f"{value:.1%}")
-    for column in ["총중량(kg)", "기준작업량", "강도지수"]:
+    table_view["접촉비중"] = table_view["접촉비중"].map(lambda value: f"{value:.1%}")
+    for column in ["총중량(kg)"]:
         table_view[column] = table_view[column].map(lambda value: f"{value:,.1f}")
 
     left, right = st.columns([1.65, 1], gap="large")
     with left:
         st.markdown("#### 존별 작업부하 상세")
-        styled = table_view.style.apply(
-            lambda row: [
-                "background-color:#ffe3e3;font-weight:700" if row["작업강도"] == "높음"
-                else "background-color:#fff1c9" if row["작업강도"] == "보통"
-                else "background-color:#e9f6df" for _ in row
-            ], axis=1
-        )
-        st.dataframe(styled, use_container_width=True, hide_index=True, height=480)
+        st.dataframe(table_view, use_container_width=True, hide_index=True, height=480)
     with right:
-        st.markdown("#### 존별 기준작업량")
-        st.bar_chart(by_zone.set_index("묶음존")["기준작업량"], color="#168a58", height=420)
+        st.markdown("#### 존별 접촉횟수")
+        st.bar_chart(by_zone.set_index("묶음존")["접촉횟수"], color="#168a58", height=420)
 
     interpretation = (
-        f"최고 부하존은 **{top_zone['묶음존']}**이며, 전체 기준작업량의 "
-        f"**{top_zone['비중']:.1%}**를 차지합니다. 평균 대비 강도지수는 "
-        f"**{top_zone['강도지수']:.2f}**입니다."
+        f"접촉횟수가 가장 많은 존은 **{top_zone['묶음존']}**이며, 전체 접촉횟수의 "
+        f"**{top_zone['접촉비중']:.1%}**를 차지합니다. 보정작업량 계수 적용 전 결과입니다."
     )
-    guide, comment = st.columns([1, 1.55], gap="large")
-    with guide:
-        st.markdown("#### 작업강도 읽는 법")
-        st.markdown(
-            """
-            <div class="grade-guide">
-              <div><b>낮음</b><span>평균 대비 0.70 미만</span></div>
-              <div><b>보통</b><span>평균 대비 0.70~1.30</span></div>
-              <div><b>높음</b><span>평균 대비 1.30 이상</span></div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with comment:
-        st.markdown("#### 자동 분석")
-        st.info(interpretation)
+    st.markdown("#### 자동 분석")
+    st.info(interpretation)
 
     tab_destination, tab_detail = st.tabs(["도착지별 분석", "상품별 상세"])
     with tab_destination:
@@ -399,7 +394,7 @@ def render_analysis() -> None:
         detail_view.columns = ["도착지", "상품코드", "상품명칭", "피킹존", "묶음존", "확정수량", "박스입수", "박스수", "낱개수", "접촉횟수", "처리물량(KG)"]
         st.dataframe(detail_view, use_container_width=True, hide_index=True, height=520)
 
-    st.caption("기준작업량은 현재 접촉횟수와 동일합니다. 강도지수는 각 존의 기준작업량 ÷ 존 평균입니다. 인원·숙련도·중량 가중치는 아직 적용하지 않았습니다.")
+    st.caption("접촉횟수 = 박스수 + 실제 낱개수입니다. 보정작업량과 작업강도는 계수가 확인된 뒤 적용합니다.")
 
 
 def render_workload_page() -> None:
