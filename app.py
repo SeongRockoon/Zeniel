@@ -42,6 +42,7 @@ def filled_rows(frame: pd.DataFrame) -> int:
 
 def initialize_state() -> None:
     defaults = {
+        "workload_view": "자료 입력·검증",
         "master_data": empty_frame(MASTER_COLUMNS),
         "destinations": [{"id": 1, "name": "도착지 1", "data": empty_frame(ORDER_COLUMNS)}],
         "destination_seq": 1,
@@ -257,6 +258,7 @@ def validate_and_analyze() -> tuple[pd.DataFrame, pd.DataFrame]:
         if valid.empty:
             continue
         valid["도착지"] = name
+        valid["도착지ID"] = destination["id"]
         valid["묶음존"] = valid["피킹존"].map(grouped_zone)
         box_order = valid["주문단위_키"].isin({"BOX", "박스", "CASE", "CS"})
         valid["박스수"] = 0
@@ -303,13 +305,15 @@ def render_validation() -> None:
         st.caption(f"현재 분석 가능 주문행: {len(st.session_state.analysis_detail):,}행")
 
 
-def render_analysis() -> None:
+def render_analysis(
+    detail: pd.DataFrame,
+    title: str,
+    destination_label: str,
+    source_rows: int,
+    show_destination_comparison: bool,
+) -> None:
     st.markdown('<div class="section-kicker">WORKLOAD ANALYSIS · DASHBOARD</div>', unsafe_allow_html=True)
-    st.subheader("피킹존 작업부하 분석 대시보드")
-    detail = st.session_state.analysis_detail
-    if detail is None:
-        st.info("먼저 ‘데이터 검증’에서 검증 실행을 눌러주세요.")
-        return
+    st.subheader(title)
     if detail.empty:
         st.warning("분석 가능한 주문자료가 없습니다. 검증 결과를 확인해주세요.")
         return
@@ -325,26 +329,13 @@ def render_analysis() -> None:
     ).sort_values("접촉횟수", ascending=False)
     total_touches = by_zone["접촉횟수"].sum()
     by_zone["접촉비중"] = by_zone["접촉횟수"].div(total_touches).fillna(0)
-    by_destination = detail.groupby("도착지", as_index=False).agg(
-        SKU수=("상품코드_키", "nunique"),
-        주문행수=("상품코드_키", "size"),
-        확정수량=("확정수량_숫자", "sum"),
-        박스수=("박스수", "sum"),
-        낱개수=("낱개수", "sum"),
-        접촉횟수=("접촉횟수", "sum"),
-        처리물량KG=("처리물량KG_숫자", "sum"),
-    ).sort_values("접촉횟수", ascending=False)
-
     top_zone = by_zone.iloc[0]
-    destinations = [d["name"] or f"도착지 {d['id']}" for d in st.session_state.destinations if filled_rows(d["data"])]
-    destination_label = ", ".join(destinations) if destinations else "입력 없음"
 
     st.markdown(
         f'<div class="analysis-meta"><b>분석일자</b> {date.today().isoformat()}<span></span>'
         f'<b>주문자료</b> {destination_label}</div>',
         unsafe_allow_html=True,
     )
-    source_rows = sum(filled_rows(item["data"]) for item in st.session_state.destinations)
     excluded_rows = max(source_rows - len(detail), 0)
     a, b, c, d, e = st.columns(5)
     a.metric("원본 라인수", f"{source_rows:,}")
@@ -385,11 +376,26 @@ def render_analysis() -> None:
     st.markdown("#### 자동 분석")
     st.info(interpretation)
 
-    tab_destination, tab_detail = st.tabs(["도착지별 분석", "상품별 상세"])
-    with tab_destination:
-        st.bar_chart(by_destination.set_index("도착지")["접촉횟수"], color="#0b5d3b")
-        st.dataframe(by_destination, use_container_width=True, hide_index=True)
-    with tab_detail:
+    if show_destination_comparison:
+        by_destination = detail.groupby("도착지", as_index=False).agg(
+            SKU수=("상품코드_키", "nunique"),
+            주문행수=("상품코드_키", "size"),
+            확정수량=("확정수량_숫자", "sum"),
+            박스수=("박스수", "sum"),
+            낱개수=("낱개수", "sum"),
+            접촉횟수=("접촉횟수", "sum"),
+            처리물량KG=("처리물량KG_숫자", "sum"),
+        ).sort_values("접촉횟수", ascending=False)
+        tab_destination, tab_detail = st.tabs(["주문지 비교", "상품별 상세"])
+        with tab_destination:
+            st.bar_chart(by_destination.set_index("도착지")["접촉횟수"], color="#0b5d3b")
+            st.dataframe(by_destination, use_container_width=True, hide_index=True)
+        detail_holder = tab_detail
+    else:
+        st.markdown("#### 상품별 상세")
+        detail_holder = st.container()
+
+    with detail_holder:
         detail_view = detail[["도착지", "상품코드_키", "상품명칭", "피킹존", "묶음존", "확정수량_숫자", "박스입수_숫자", "박스수", "낱개수", "접촉횟수", "처리물량KG_숫자"]].copy()
         detail_view.columns = ["도착지", "상품코드", "상품명칭", "피킹존", "묶음존", "확정수량", "박스입수", "박스수", "낱개수", "접촉횟수", "처리물량(KG)"]
         st.dataframe(detail_view, use_container_width=True, hide_index=True, height=520)
@@ -397,7 +403,7 @@ def render_analysis() -> None:
     st.caption("접촉횟수 = 박스수 + 실제 낱개수입니다. 보정작업량과 작업강도는 계수가 확인된 뒤 적용합니다.")
 
 
-def render_workload_page() -> None:
+def render_input_and_validation() -> None:
     st.markdown("### 입력자료")
     master_rows = filled_rows(st.session_state.master_data)
     order_rows = sum(filled_rows(item["data"]) for item in st.session_state.destinations)
@@ -426,7 +432,75 @@ def render_workload_page() -> None:
             st.warning(f"확인할 항목이 {len(result):,}건 있습니다. 해당 행은 분석에서 제외했습니다.")
             with st.expander("검증 오류 상세 보기"):
                 st.dataframe(result, use_container_width=True, hide_index=True, height=260)
-        render_analysis()
+        st.info("검증이 끝났습니다. 위 메뉴에서 ‘주문지별 대시보드’ 또는 ‘당일 최종분석’을 선택하세요.")
+
+
+def render_destination_dashboard() -> None:
+    detail = st.session_state.analysis_detail
+    if detail is None or detail.empty:
+        st.info("먼저 ‘자료 입력·검증’ 화면에서 검증하고 분석하기를 실행해주세요.")
+        return
+
+    available = []
+    for destination in st.session_state.destinations:
+        destination_id = destination["id"]
+        if destination_id in set(detail["도착지ID"]):
+            available.append((destination_id, destination["name"] or f"도착지 {destination_id}"))
+    if not available:
+        st.warning("분석 가능한 주문지가 없습니다.")
+        return
+
+    label_by_id = {destination_id: label for destination_id, label in available}
+    selected_id = st.selectbox(
+        "분석할 주문지 선택",
+        options=[destination_id for destination_id, _ in available],
+        format_func=lambda value: label_by_id[value],
+    )
+    selected_detail = detail.loc[detail["도착지ID"].eq(selected_id)].copy()
+    destination = next(item for item in st.session_state.destinations if item["id"] == selected_id)
+    render_analysis(
+        selected_detail,
+        f"{label_by_id[selected_id]} 작업부하 대시보드",
+        label_by_id[selected_id],
+        filled_rows(destination["data"]),
+        False,
+    )
+
+
+def render_daily_dashboard() -> None:
+    detail = st.session_state.analysis_detail
+    if detail is None or detail.empty:
+        st.info("먼저 ‘자료 입력·검증’ 화면에서 검증하고 분석하기를 실행해주세요.")
+        return
+    destinations = [d["name"] or f"도착지 {d['id']}" for d in st.session_state.destinations if filled_rows(d["data"])]
+    render_analysis(
+        detail,
+        "당일 최종 작업부하 대시보드",
+        " + ".join(destinations),
+        sum(filled_rows(item["data"]) for item in st.session_state.destinations),
+        True,
+    )
+
+
+def render_workload_page() -> None:
+    views = ["자료 입력·검증", "주문지별 대시보드", "당일 최종분석"]
+    selected = st.segmented_control(
+        "작업량 분석 화면",
+        views,
+        default=st.session_state.workload_view,
+        selection_mode="single",
+        label_visibility="collapsed",
+    )
+    if selected:
+        st.session_state.workload_view = selected
+    st.divider()
+
+    if st.session_state.workload_view == "자료 입력·검증":
+        render_input_and_validation()
+    elif st.session_state.workload_view == "주문지별 대시보드":
+        render_destination_dashboard()
+    else:
+        render_daily_dashboard()
 
 
 def render_placeholder(title: str, message: str) -> None:
