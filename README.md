@@ -9,7 +9,25 @@
 - 박스수, 낱개수, 접촉횟수, 총중량 계산
 - 묶음 존별 요약과 차트
 - 입력 내용 초기화
-- 파일 및 업무 데이터의 GitHub 커밋 방지 규칙
+- 상품마스터 저장 및 앱 시작 시 자동 불러오기
+
+## 상품마스터 저장 설정
+
+상품마스터는 `data/product_master.json`에 저장됩니다. 실제 업무자료를 저장할 경우
+GitHub 저장소와 Streamlit 앱을 모두 비공개로 운영하세요.
+
+1. GitHub에서 `SeongRockoon/Zeniel` 저장소만 접근 가능한 Fine-grained token을 만듭니다.
+2. 토큰 권한은 `Contents: Read and write`만 부여합니다.
+3. Streamlit Community Cloud의 앱 설정에서 `Secrets`에 아래 내용을 입력합니다.
+
+```toml
+[github]
+token = "발급받은_토큰"
+repo = "SeongRockoon/Zeniel"
+branch = "main"
+```
+
+토큰을 `app.py`, `README.md`, `secrets.toml` 또는 GitHub 저장소 파일에 직접 올리지 마세요.
 
 ## 로컬 실행
 

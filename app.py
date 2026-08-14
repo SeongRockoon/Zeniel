@@ -1,6 +1,10 @@
 import pandas as pd
 import streamlit as st
-from datetime import date
+import base64
+import json
+from datetime import date, datetime, timezone
+
+import requests
 
 
 st.set_page_config(
@@ -30,9 +34,106 @@ ORDER_COLUMNS = [
     "고객(하나로마트 경로만) | 고객코드", "고객(하나로마트 경로만) | 고객명",
 ]
 
+MASTER_STORAGE_PATH = "data/product_master.json"
+
 
 def empty_frame(columns: list[str], rows: int = 50) -> pd.DataFrame:
     return pd.DataFrame("", index=range(rows), columns=columns)
+
+
+def repository_storage_config() -> tuple[str, str, str] | None:
+    try:
+        config = st.secrets.get("github", {})
+        token = str(config.get("token", "")).strip()
+        repository = str(config.get("repo", "")).strip()
+        branch = str(config.get("branch", "main")).strip() or "main"
+    except Exception:
+        return None
+    if not token or not repository:
+        return None
+    return token, repository, branch
+
+
+def repository_headers(token: str) -> dict[str, str]:
+    return {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def padded_master(frame: pd.DataFrame) -> pd.DataFrame:
+    normalized = frame.reindex(columns=MASTER_COLUMNS, fill_value="").fillna("").astype(str)
+    if len(normalized) < 50:
+        normalized = pd.concat(
+            [normalized, empty_frame(MASTER_COLUMNS, 50 - len(normalized))],
+            ignore_index=True,
+        )
+    return normalized.reset_index(drop=True)
+
+
+def load_master_from_repository() -> tuple[pd.DataFrame | None, str]:
+    config = repository_storage_config()
+    if config is None:
+        return None, "저장 연동이 설정되지 않았습니다."
+    token, repository, branch = config
+    url = f"https://api.github.com/repos/{repository}/contents/{MASTER_STORAGE_PATH}"
+    try:
+        response = requests.get(
+            url,
+            headers=repository_headers(token),
+            params={"ref": branch},
+            timeout=15,
+        )
+        if response.status_code == 404:
+            return None, "아직 저장된 상품마스터가 없습니다."
+        response.raise_for_status()
+        encoded = response.json()["content"].replace("\n", "")
+        payload = json.loads(base64.b64decode(encoded).decode("utf-8"))
+        frame = pd.DataFrame(payload.get("rows", []))
+        return padded_master(frame), f"저장된 상품마스터 {len(frame):,}행을 불러왔습니다."
+    except Exception as error:
+        return None, f"상품마스터를 불러오지 못했습니다: {error}"
+
+
+def save_master_to_repository(frame: pd.DataFrame) -> tuple[bool, str]:
+    config = repository_storage_config()
+    if config is None:
+        return False, "저장 연동 설정이 필요합니다."
+    token, repository, branch = config
+    clean = frame.reindex(columns=MASTER_COLUMNS, fill_value="").fillna("").astype(str)
+    mask = clean.apply(lambda column: column.str.strip()).ne("").any(axis=1)
+    clean = clean.loc[mask].reset_index(drop=True)
+    if clean.empty:
+        return False, "빈 상품마스터는 저장할 수 없습니다."
+
+    url = f"https://api.github.com/repos/{repository}/contents/{MASTER_STORAGE_PATH}"
+    headers = repository_headers(token)
+    try:
+        current = requests.get(url, headers=headers, params={"ref": branch}, timeout=15)
+        sha = current.json().get("sha") if current.status_code == 200 else None
+        if current.status_code not in {200, 404}:
+            current.raise_for_status()
+        document = {
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "columns": MASTER_COLUMNS,
+            "rows": clean.to_dict(orient="records"),
+        }
+        content = base64.b64encode(
+            json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8")
+        ).decode("ascii")
+        body = {
+            "message": f"상품마스터 저장 ({len(clean)}행)",
+            "content": content,
+            "branch": branch,
+        }
+        if sha:
+            body["sha"] = sha
+        saved = requests.put(url, headers=headers, json=body, timeout=30)
+        saved.raise_for_status()
+        return True, f"상품마스터 {len(clean):,}행을 저장했습니다."
+    except Exception as error:
+        return False, f"상품마스터를 저장하지 못했습니다: {error}"
 
 
 def filled_rows(frame: pd.DataFrame) -> int:
@@ -48,10 +149,18 @@ def initialize_state() -> None:
         "destination_seq": 1,
         "validation_result": None,
         "analysis_detail": None,
+        "master_storage_checked": False,
+        "master_storage_message": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+    if not st.session_state.master_storage_checked:
+        stored, message = load_master_from_repository()
+        if stored is not None:
+            st.session_state.master_data = stored
+        st.session_state.master_storage_message = message
+        st.session_state.master_storage_checked = True
 
 
 def reset_master() -> None:
@@ -72,12 +181,17 @@ def render_master() -> None:
         '<div class="section-kicker">WORKLOAD ANALYSIS · STEP 01</div>',
         unsafe_allow_html=True,
     )
-    title, action = st.columns([5, 1])
-    with title:
-        st.subheader("상품마스터")
-        st.caption("원본 31개 열을 유지합니다. 엑셀의 데이터 행만 복사해 첫 번째 셀에 붙여넣으세요.")
-    with action:
-        st.button("전체 초기화", on_click=reset_master, use_container_width=True)
+    st.subheader("상품마스터")
+    st.caption("원본 31개 열을 유지합니다. 엑셀의 데이터 행만 복사해 첫 번째 셀에 붙여넣으세요.")
+
+    storage_configured = repository_storage_config() is not None
+    if storage_configured:
+        st.success(st.session_state.master_storage_message or "상품마스터 저장소가 연결되어 있습니다.")
+    else:
+        st.warning(
+            "상품마스터 영구 저장을 사용하려면 앱 비밀정보에 GitHub 저장 설정이 필요합니다. "
+            "실제 업무자료는 비공개 저장소에서만 사용하세요."
+        )
 
     st.info(
         "표의 첫 번째 셀을 선택한 뒤 Ctrl+V 하세요. 열 제목은 붙여넣지 않습니다. "
@@ -93,6 +207,33 @@ def render_master() -> None:
         column_config={column: st.column_config.TextColumn(column, width="medium") for column in MASTER_COLUMNS},
     )
     st.session_state.master_data = edited
+
+    save_col, reload_col, reset_col, spacer = st.columns([1.25, 1.25, 1, 3.5])
+    with save_col:
+        if st.button(
+            "상품마스터 저장",
+            type="primary",
+            use_container_width=True,
+            disabled=not storage_configured,
+        ):
+            success, message = save_master_to_repository(edited)
+            st.session_state.master_storage_message = message
+            if success:
+                st.success(message)
+            else:
+                st.error(message)
+    with reload_col:
+        if st.button("저장본 다시 불러오기", use_container_width=True, disabled=not storage_configured):
+            stored, message = load_master_from_repository()
+            st.session_state.master_storage_message = message
+            if stored is not None:
+                st.session_state.master_data = stored
+                st.session_state.pop("master_editor", None)
+                st.rerun()
+            st.error(message)
+    with reset_col:
+        st.button("화면 초기화", on_click=reset_master, use_container_width=True)
+
     left, middle, right = st.columns(3)
     left.metric("입력 행", f"{filled_rows(edited):,}")
     middle.metric("기준 열", "31")
